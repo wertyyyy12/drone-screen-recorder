@@ -32,7 +32,7 @@ def preprocess_image(image, threshold=200):
     normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
     
     # Apply inverted binary threshold
-    _, binary_inv = cv2.threshold(normalized, threshold, 255, cv2.THRESH_BINARY_INV)
+    _, binary_inv = cv2.threshold(normalized, threshold, 255, cv2.THRESH_BINARY)
     
     # Convert back to BGR for visualization and saving
     binary_inv_bgr = cv2.cvtColor(binary_inv, cv2.COLOR_GRAY2BGR)
@@ -120,13 +120,13 @@ def detect_contours(image):
         # Assuming input 'image' from preprocessing is always inverted binary (0 background)
         if 255 in unique_values: # Check if there are any white pixels (objects)
              thresh = gray
-             print("Using preprocessed binary image for contours.")
+             #print("Using preprocessed binary image for contours.") # Reduced verbosity
         else: # Only black pixels? Empty image for contour finding.             
              thresh = np.zeros_like(gray)
-             print("Preprocessed image is all black, no contours to find.")
+             #print("Preprocessed image is all black, no contours to find.")
     else:
         # If not binary, apply normalization and thresholding (find bright spots)
-        print("Applying internal thresholding for contours (finding bright spots).")
+        #print("Applying internal thresholding for contours (finding bright spots).")
         normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
         _, thresh = cv2.threshold(normalized, 180, 255, cv2.THRESH_BINARY)
     
@@ -188,7 +188,7 @@ def draw_boxes_around_white_regions(target_image_to_draw_on, binary_image, min_a
         min_area: Minimum pixel area to consider a region valid (filters noise).
 
     Returns:
-        The target image with bounding boxes drawn.
+        Tuple: (Image with bounding boxes drawn, list of bounding boxes (x,y,w,h))
     """
     
     # 1. Ensure grayscale
@@ -222,7 +222,7 @@ def draw_boxes_around_white_regions(target_image_to_draw_on, binary_image, min_a
             cv2.rectangle(output_image, (x, y), (x + w, y + h), box_color, thickness)
             detections.append((x, y, w, h)) # Store the box
             
-    print(f"Found {len(detections)} white regions (originally black) above min_area {min_area}")
+    #print(f"Found {len(detections)} white regions (originally black) above min_area {min_area}")
     return output_image, detections
 
 async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
@@ -263,7 +263,7 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
             if 0 <= x1 < x2 and 0 <= y1 < y2 and x2 <= width and y2 <= height:
                 original_img = original_img[y1:y2, x1:x2]
             else:
-                print(f"Warning: Invalid crop coordinates for image of size {width}x{height}. Skipping crop.")
+                print(f"Warning: Invalid crop coordinates {crop_coords} for image of size {width}x{height}. Skipping crop.")
         
         # Create filename based on frame number
         filename = f"frame_{frame_number:06d}.jpg"
@@ -280,8 +280,8 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
             preprocessed_filepath = save_dir / preprocessed_filename
             if not cv2.imwrite(str(preprocessed_filepath), preprocessed_inv_img):
                  print(f"Error: Failed to save preprocessed image {preprocessed_filepath}")
-            else:
-                print(f"Saved inverted preprocessed frame to {preprocessed_filepath}")
+            # else:
+                # print(f"Saved inverted preprocessed frame to {preprocessed_filepath}") # Reduced verbosity
             
             # Find white regions (originally black) and draw boxes on original image
             img_to_save, detections = draw_boxes_around_white_regions(original_img, preprocessed_inv_img)
@@ -291,34 +291,38 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
             detection_img = original_img # Use original for detection when not preprocessing
             if use_contours:
                 detections = detect_contours(detection_img)
-                print(f"Detected {len(detections)} contours in frame {frame_number}")
+                # print(f"Detected {len(detections)} contours in frame {frame_number}") # Reduced verbosity
             else:
                 detections = detect_blobs(detection_img)
-                print(f"Detected {len(detections)} blobs in frame {frame_number}")
+                # print(f"Detected {len(detections)} blobs in frame {frame_number}") # Reduced verbosity
             
             # Draw standard detections onto the original image
-            img_to_save = draw_detections(original_img, detections, use_contours)
+            if detections:
+                 img_to_save = draw_detections(original_img, detections, use_contours)
             
         # Save the final image (original + appropriate detections/boxes)
         if not cv2.imwrite(str(filepath), img_to_save):
             print(f"Error: Failed to save final image {filepath}")
             return None, detections # Return detections even if save failed
-        else:
+        # else:
              # Add log for successful save of final image
-             print(f"Saved final annotated frame {frame_number} to {filepath}")
+             # print(f"Saved final annotated frame {frame_number} to {filepath}") # Reduced verbosity
 
         return filepath, detections
         
     except Exception as e:
         print(f"Error processing frame {frame_number}: {e}")
+        import traceback
+        traceback.print_exc()
         return None, []
 
+async def process_client_frames(websocket, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
+    """Receive frames from the client, process them, and send ACKs."""
+    client_addr = websocket.remote_address
+    print(f"Processing frames from client: {client_addr}")
+    frames_processed = 0
+    frames_failed = 0
 
-async def handle_connection(websocket, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
-    """Handle incoming WebSocket connections."""
-    client_info = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
-    print(f"Client connected: {client_info}")
-    
     try:
         async for message in websocket:
             try:
@@ -328,7 +332,7 @@ async def handle_connection(websocket, save_dir, crop_coords=None, use_contours=
                 frame_data = data.get("image_data")
                 
                 if frame_number is None or frame_data is None:
-                    print(f"Received invalid message format from {client_info}")
+                    print(f"Received invalid message format from {client_addr}")
                     await websocket.send(json.dumps({"status": "error", "frame_number": frame_number, "message": "Invalid message format"}))
                     continue
                 
@@ -341,41 +345,45 @@ async def handle_connection(websocket, save_dir, crop_coords=None, use_contours=
                 # Send acknowledgment back to client
                 if filepath:
                     ack_message = json.dumps({"status": "processed", "frame_number": frame_number})
-                    # Removed print statement for saved frame here, handled in save_frame
+                    frames_processed += 1
                 else:
                     ack_message = json.dumps({"status": "error", "frame_number": frame_number, "message": "Processing failed"})
-                    print(f"Failed to process frame {frame_number}")
+                    frames_failed += 1
+                    print(f"Failed to process frame {frame_number} from {client_addr}")
                 
                 await websocket.send(ack_message)
-                # Removed print statement for sent ACK here for cleaner logs
 
             except json.JSONDecodeError:
-                print(f"Received non-JSON message from {client_info}")
+                print(f"Received non-JSON message from {client_addr}")
                 await websocket.send(json.dumps({"status": "error", "message": "Invalid JSON"}))
             except Exception as e:
                 # Log specific error during message handling but keep connection open
-                print(f"Error handling message from {client_info}: {e}")
+                print(f"Error handling message from {client_addr}: {e}")
+                import traceback
+                traceback.print_exc()
                 # Send error ack if possible
                 try:
                     frame_num_for_error = data.get("frame_number", -1) if 'data' in locals() else -1
                     await websocket.send(json.dumps({"status": "error", "frame_number": frame_num_for_error, "message": str(e)}))
                 except Exception as send_err:
-                    print(f"Failed to send error acknowledgment to {client_info}: {send_err}")
+                    print(f"Failed to send error acknowledgment to {client_addr}: {send_err}")
                 
     except websockets.exceptions.ConnectionClosedOK:
-        print(f"Connection closed normally with {client_info}")
+        print(f"Connection closed normally by client: {client_addr}")
     except websockets.exceptions.ConnectionClosedError as e:
-        print(f"Connection closed with error for {client_info}: {e}")
+        print(f"Connection closed with error for {client_addr}: {e}")
     except Exception as e:
-        print(f"Unexpected error in handle_connection for {client_info}: {e}")
+        print(f"Unexpected error in frame processing loop for {client_addr}: {e}")
+        import traceback
+        traceback.print_exc()        
     finally:
-        print(f"Connection handler finished for {client_info}")
+        print(f"Finished processing frames for {client_addr}. Processed: {frames_processed}, Failed: {frames_failed}")
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="WebSocket server to receive and save video frames")
-    parser.add_argument("--host", type=str, default="localhost", help="Server host (default: localhost)")
-    parser.add_argument("--port", type=int, default=8765, help="Server port (default: 8765)")
+    parser = argparse.ArgumentParser(description="Connect to client and process video frames.")
+    parser.add_argument("--client-host", type=str, default="localhost", help="Client host address to connect to (default: localhost)")
+    parser.add_argument("--client-port", type=int, default=8765, help="Client port to connect to (default: 8765)")
     parser.add_argument("--save-dir", type=str, default="./files/frames", 
                         help="Directory to save frames (default: ./files/frames)")
     parser.add_argument("--crop-x1", type=int, default=108, help="Left coordinate for cropping (default: 108)")
@@ -401,31 +409,44 @@ async def main():
     crop_coords = None
     if not args.no_crop:
         crop_coords = (args.crop_x1, args.crop_y1, args.crop_x2, args.crop_y2)
-        print(f"Images will be cropped to: ({args.crop_x1}, {args.crop_y1}) to ({args.crop_x2}, {args.crop_y2})")
+        print(f"Will crop images to: ({args.crop_x1}, {args.crop_y1}) to ({args.crop_x2}, {args.crop_y2})")
     
-    # Start the WebSocket server
-    print(f"Starting WebSocket server on {args.host}:{args.port}")
-    print(f"Frames will be saved to {save_dir.absolute()}")
-    
+    # Determine processing mode for logging
     if args.preprocess:
-        print(f"Preprocessing enabled: Finding dark regions below threshold {args.threshold} using inverted binary image.")
+        print(f"Preprocessing enabled: Finding dark regions below threshold {args.threshold}.")
     else:
-        # Log the detection method being used when not preprocessing
         detection_method = "contour" if args.use_contours else "blob"
-        print(f"Standard detection enabled using {detection_method} detection (finding bright spots/blobs).")
-    
-    async with websockets.serve(
-        lambda ws: handle_connection(
-            ws, save_dir, crop_coords, 
-            args.use_contours, args.preprocess, args.threshold
-        ), 
-        args.host, 
-        args.port,
-        # Increase queue size and message size limits if needed
-        # max_size=2**24, # Example: 16MB message limit
-        # max_queue=128   # Example: Buffer up to 128 messages
-    ):
-        await asyncio.Future()  # Run forever
+        print(f"Standard detection enabled using {detection_method} detection.")
+
+    client_url = f"ws://{args.client_host}:{args.client_port}"
+    print(f"Attempting to connect to client at {client_url}...")
+    print(f"Frames will be saved to {save_dir.absolute()}")
+
+    while True: # Keep trying to connect
+        try:
+            async with websockets.connect(
+                client_url,
+                ping_interval=10,
+                ping_timeout=10,
+                open_timeout=5 # Shorter connection timeout
+            ) as websocket:
+                print(f"Connected to client at {client_url}")
+                await process_client_frames(
+                    websocket, save_dir, crop_coords, 
+                    args.use_contours, args.preprocess, args.threshold
+                )
+                print("Finished processing client frames. Server exiting.")
+                break # Exit loop after successful processing
+
+        except (ConnectionRefusedError, asyncio.TimeoutError, websockets.exceptions.InvalidURI, OSError) as e:
+            print(f"Connection failed: {e}. Retrying in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            print(f"An unexpected error occurred during connection/processing: {e}")
+            import traceback
+            traceback.print_exc()
+            print("Retrying in 10 seconds...")
+            await asyncio.sleep(10)
 
 
 if __name__ == "__main__":

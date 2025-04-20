@@ -7,17 +7,18 @@ from pathlib import Path
 
 import cv2
 import websockets
+from websockets.connection import State  # Import State enum
 
 
 async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interval=25, target_frames=None):
     """
-    Extract frames from the video file, send them over the WebSocket connection,
+    Extract frames from the video file, send them over the established WebSocket connection,
     and wait for acknowledgment before sending the next frame.
     Sends every Nth frame OR specific frames if target_frames is provided.
     Crops the top and bottom of each frame.
     
     Args:
-        websocket: The WebSocket connection object.
+        websocket: The established WebSocket connection object.
         video_path: Path to the video file.
         crop_top: Pixels to crop from the top.
         crop_bottom: Pixels to crop from the bottom.
@@ -26,7 +27,9 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
     """
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
+        print(f"Error: Could not open video file: {video_path}. Exiting handler.")
+        # Send error message to server?
+        return # Exit this handler if video fails
     
     frame_count = 0
     sent_frame_counter = 0
@@ -34,6 +37,12 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
     
     try:
         while cap.isOpened():
+            # Check if the server connection is still open before reading frame
+            # Use websocket.state for checking connection status
+            if websocket.state == State.CLOSED or websocket.state == State.CLOSING:
+                print("Server connection closed or closing. Stopping frame sending.")
+                break
+                
             ret, frame = cap.read()
             if not ret:
                 break
@@ -74,31 +83,37 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                 
                 # Send frame over WebSocket
                 try:
+                    # Check connection again before sending
+                    if websocket.state != State.OPEN:
+                         print(f"Connection not open before sending frame {frame_count}. Stopping.")
+                         break
+                         
                     await websocket.send(json.dumps(message))
                     print(f"Sent frame {frame_count}")
                     sent_frame_counter += 1
                     
                     # Wait for acknowledgment
                     try:
-                        ack_message = await asyncio.wait_for(websocket.recv(), timeout=10.0) # 10 second timeout
+                        # Increased timeout slightly
+                        ack_message = await asyncio.wait_for(websocket.recv(), timeout=20.0) 
                         ack_data = json.loads(ack_message)
                         
                         if ack_data.get("status") == "processed" and ack_data.get("frame_number") == frame_count:
                             print(f"Received acknowledgment for frame {frame_count}")
                         elif ack_data.get("status") == "error":
                             print(f"Server error for frame {frame_count}: {ack_data.get('message', 'Unknown error')}")
-                            # Decide whether to continue or stop
-                            # break # Example: Stop on server error
+                            # Optionally stop on server error
+                            # break 
                         else:
                             print(f"Warning: Received unexpected acknowledgment: {ack_data}")
-                            # Decide how to handle this - maybe retry or stop?
-                            # break # Example: Stop on unexpected ACK
+                            # Optionally stop on unexpected ACK
+                            # break 
                             
                     except asyncio.TimeoutError:
                         print(f"Error: Timeout waiting for acknowledgment for frame {frame_count}. Stopping.")
                         break # Stop sending frames on timeout
                     except json.JSONDecodeError:
-                        print("Error: Received invalid JSON acknowledgment. Stopping.")
+                        print(f"Error: Received invalid JSON acknowledgment: {ack_message}. Stopping.")
                         break
                     except websockets.exceptions.ConnectionClosed:
                         print("Error: Connection closed while waiting for acknowledgment. Stopping.")
@@ -131,13 +146,51 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                 print(f"Warning: Did not find/process the following requested frames: {sorted(list(missed_frames))}")
         else:
              print(f"Finished sending interval frames. Read {total_frames_read} frames, sent {sent_frame_counter} frames (interval: {frame_interval}).")
+        
+        # Try to close the connection gracefully from the client side after finishing
+        # Use websocket.state for checking
+        if websocket.state == State.OPEN:
+            print("Closing connection from client side.")
+            await websocket.close()
+
+# Define global arguments to be accessible in the handler
+args = None
+target_frames_set = None
+
+async def connection_handler(websocket):
+    """Handles a single incoming connection from the server."""
+    global args, target_frames_set
+    server_addr = websocket.remote_address
+    print(f"Connection established with server: {server_addr}")
+    try:
+        # Start sending frames using the established connection and global args
+        await send_frames(
+            websocket, 
+            args.video_path,
+            args.crop_top,
+            args.crop_bottom,
+            args.frame_interval,
+            target_frames_set # Use the parsed set of target frames
+        )
+    except Exception as e:
+        print(f"Error during send_frames for connection {server_addr}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"Finished handling connection from {server_addr}")
+        # Connection should be closed by send_frames or if an error occurred
+        # Use websocket.state for checking
+        if websocket.state == State.OPEN:
+             print("Attempting final close from handler.")
+             await websocket.close()
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Send video frames over WebSocket")
+    global args, target_frames_set
+    parser = argparse.ArgumentParser(description="Listen for server connection and send video frames.")
     parser.add_argument("video_path", type=str, help="Path to the MP4 file")
-    parser.add_argument("--host", type=str, default="localhost", help="WebSocket server host")
-    parser.add_argument("--port", type=int, default=8765, help="WebSocket server port")
+    parser.add_argument("--listen-host", type=str, default="0.0.0.0", help="Host address to listen on (default: 0.0.0.0)")
+    parser.add_argument("--listen-port", type=int, default=8765, help="Port to listen on (default: 8765)")
     parser.add_argument("--crop-top", type=int, default=0, help="Number of pixels to crop from the top")
     parser.add_argument("--crop-bottom", type=int, default=0, help="Number of pixels to crop from the bottom")
     parser.add_argument("--frame-interval", type=int, default=25, help="Send every Nth frame (ignored if --frames is used)")
@@ -146,53 +199,39 @@ async def main():
     
     args = parser.parse_args()
     
-    target_frames = None
+    target_frames_set = None
     if args.frames:
         try:
-            target_frames = set(int(f.strip()) for f in args.frames.split(',') if f.strip().isdigit())
-            if not target_frames:
+            target_frames_set = set(int(f.strip()) for f in args.frames.split(',') if f.strip().isdigit())
+            if not target_frames_set:
                  print("Error: No valid frame numbers provided in --frames argument.")
                  return
-            print(f"Attempting to send specific frames: {sorted(list(target_frames))}")
+            print(f"Will attempt to send specific frames: {sorted(list(target_frames_set))}")
         except ValueError:
             print("Error: Invalid format for --frames argument. Please use comma-separated integers.")
             return
     
-    video_path = Path(args.video_path)
-    if not video_path.exists():
-        print(f"Error: Video file not found: {video_path}")
+    video_path_obj = Path(args.video_path)
+    if not video_path_obj.exists():
+        print(f"Error: Video file not found: {args.video_path}")
         return
+    args.video_path = video_path_obj # Ensure it's a Path object
+
+    print(f"Client waiting for connection from server on {args.listen_host}:{args.listen_port}")
     
-    websocket_url = f"ws://{args.host}:{args.port}"
-    print(f"Connecting to WebSocket server at {websocket_url}")
-    
+    # Serve connections - connection_handler will be called for each incoming connection
+    # This will run until the handler finishes (or forever if no connection)
+    # Consider adding logic to stop the server after one successful handling if desired.
+    stop_event = asyncio.Event() # For potential future graceful shutdown
     try:
-        # Set higher connection timeout and ping interval/timeout
-        async with websockets.connect(
-            websocket_url, 
-            open_timeout=10,
-            ping_interval=20,
-            ping_timeout=20
-        ) as websocket:
-            print(f"Connected to {websocket_url}")
-            await send_frames(
-                websocket, 
-                video_path,
-                args.crop_top,
-                args.crop_bottom,
-                args.frame_interval,
-                target_frames # Pass the set of target frames
-            )
-    except websockets.exceptions.InvalidURI:
-         print(f"Error: Invalid WebSocket URI: {websocket_url}")
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"Connection closed unexpectedly: {e}")
-    except ConnectionRefusedError:
-        print(f"Error: Connection refused by server at {websocket_url}")
-    except asyncio.TimeoutError:
-        print(f"Error: Connection timed out to {websocket_url}")
+        async with websockets.serve(connection_handler, args.listen_host, args.listen_port):
+            await stop_event.wait() # Keep server running indefinitely (or until handler finishes/error)
+    except OSError as e:
+         print(f"Error starting client listener: {e}. Port likely in use.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"An unexpected error occurred running the client listener: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
