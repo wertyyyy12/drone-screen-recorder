@@ -561,7 +561,6 @@ async def main():
     parser.add_argument("--crop-x2", type=int, default=984, help="Right coordinate for cropping (default: 984)")
     parser.add_argument("--crop-y2", type=int, default=1527, help="Bottom coordinate for cropping (default: 1527)")
     parser.add_argument("--no-crop", action="store_true", help="Disable cropping")
-    # Removed --detect flag
     parser.add_argument("--use-contours", action="store_true", default=True,
                         help="Use contour detection instead of the default blob detection (ignored if --preprocess is used).")
     parser.add_argument("--preprocess", action="store_true", default=True,
@@ -575,17 +574,14 @@ async def main():
     
     args = parser.parse_args()
         
-    # Ensure save directory exists
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     
-    # Setup crop coordinates
     crop_coords = None
     if not args.no_crop:
         crop_coords = (args.crop_x1, args.crop_y1, args.crop_x2, args.crop_y2)
         print(f"Will crop images to: ({args.crop_x1}, {args.crop_y1}) to ({args.crop_x2}, {args.crop_y2})")
     
-    # Determine processing mode for logging
     if args.preprocess:
         print(f"Preprocessing enabled: Finding dark regions below threshold {args.threshold}.")
     else:
@@ -597,31 +593,62 @@ async def main():
     print(f"Frames will be saved to {save_dir.absolute()}")
     print(f"Will listen for frontend connections on ws://{args.frontend_host}:{args.frontend_port}")
 
-    # Create the shared buffer queue
     threat_buffer_queue = asyncio.Queue()
 
-    # Define the task for connecting to the frame client and processing
-    client_connection_task = connect_and_process_client(
-        client_url, threat_buffer_queue, save_dir, crop_coords, 
-        args.use_contours, args.preprocess, args.threshold
-    )
-
-    # Define the task for serving the frontend
-    # Use partial to pass the queue to the handler
+    # Start the frontend server task in the background
     handler_with_queue = functools.partial(frontend_handler, queue=threat_buffer_queue)
-    frontend_server_task = websockets.serve(
+    frontend_server = await websockets.serve(
         handler_with_queue, 
         args.frontend_host, 
         args.frontend_port
     )
+    frontend_task = asyncio.create_task(frontend_server.serve_forever(), name="FrontendServerTask")
+    print("Frontend server started.")
 
-    print("Starting client connection handler and frontend server...")
-    # Run both concurrently
-    await asyncio.gather(
-        client_connection_task, 
-        frontend_server_task
-    )
-    print("Server tasks finished.")
+    # Run the client connection task and wait for it to complete (or fail)
+    print("Starting client connection handler...")
+    try:
+        await connect_and_process_client(
+            client_url, threat_buffer_queue, save_dir, crop_coords, 
+            args.use_contours, args.preprocess, args.threshold
+        )
+        print("Client connection handler finished normally.")
+    except Exception as client_err:
+        print(f"Client connection handler exited with error: {client_err}")
+        # Decide if we need to propagate the error or just log it
+
+    # --- Graceful Shutdown --- 
+    print("Client connection task finished. Starting graceful shutdown...")
+
+    # 1. Wait for the queue to be empty
+    if not threat_buffer_queue.empty():
+        print(f"Waiting for {threat_buffer_queue.qsize()} items in the queue to be processed...")
+        await threat_buffer_queue.join() # Waits until all task_done() calls are made
+        print("Threat buffer queue is now empty.")
+    else:
+        print("Threat buffer queue was already empty.")
+
+    # 2. Stop the frontend server task
+    print("Stopping frontend server task...")
+    if not frontend_task.done():
+        frontend_task.cancel()
+        try:
+            await frontend_task # Wait for the task to acknowledge cancellation
+        except asyncio.CancelledError:
+            print("Frontend server task successfully cancelled.")
+        except Exception as e:
+            print(f"Error occurred while awaiting frontend task cancellation: {e}")
+    else:
+         print("Frontend server task was already done.")
+         # Check for exceptions if it finished unexpectedly
+         if frontend_task.exception():
+             print(f"Frontend task finished with exception: {frontend_task.exception()}")
+
+    # Close the server socket itself (optional but good practice)
+    frontend_server.close()
+    await frontend_server.wait_closed()
+    print("Frontend server socket closed.")
+    print("Shutdown complete.")
 
 
 async def connect_and_process_client(client_url, queue, save_dir, crop_coords, use_contours, preprocess, threshold):
