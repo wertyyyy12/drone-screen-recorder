@@ -66,7 +66,7 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                 cropped_frame = frame[crop_top:height-crop_bottom, :]
                 
                 # Convert frame to JPEG format
-                ret_encode, buffer = cv2.imencode('.jpg', cropped_frame)
+                ret_encode, buffer = cv2.imencode('.jpg', cropped_frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
                 # print how big the jpeg image is
                 print(f"JPEG image size: {len(buffer)} bytes")
                 if not ret_encode:
