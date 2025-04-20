@@ -614,8 +614,8 @@ async def main():
                         help="Host address for this server to listen on for frontend connections (default: 0.0.0.0)")
     parser.add_argument("--frontend-port", type=int, default=8766, # Different default from client
                         help="Port for this server to listen on for frontend connections (default: 8766)")
-    parser.add_argument("--buffer-interval", type=float, default=1,
-                        help="Buffer interval in seconds between threat data frames (default: 10)")
+    parser.add_argument("--buffer-interval", type=float, default=0,
+                        help="Buffer interval in seconds between threat data frames (default: 0)")
     
     global args
     args = parser.parse_args()
@@ -752,6 +752,9 @@ async def frontend_handler(websocket, queue):
             try:
                 await websocket.send(json.dumps(threat_data))
                 queue.task_done() # Acknowledge processing
+                # Add delay after sending, before getting the next item
+                if args.buffer_interval > 0:
+                    await asyncio.sleep(args.buffer_interval)
             except websockets.exceptions.ConnectionClosed:
                 print(f"Frontend connection {client_addr} closed while trying to send. Requeuing data.")
                 # Basic requeue: Put the item back at the end. Might cause infinite loop if connection is broken.
