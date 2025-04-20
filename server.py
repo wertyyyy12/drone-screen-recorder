@@ -498,8 +498,7 @@ async def process_client_frames(websocket, queue, save_dir, crop_coords=None, us
                             # Construct message
                             threat_data = {
                                 "user_center": user_center,
-                                "threat_center": threat_centers,
-                                "img": img_base64,
+                                "threat_centers": threat_centers,
                                 "frame_number": frame_number # Include frame number for context
                             }
                             
@@ -689,7 +688,7 @@ async def connect_and_process_client(client_url, queue, save_dir, crop_coords, u
             await asyncio.sleep(10)
 
 # --- Frontend Handler --- 
-async def frontend_handler(websocket, path, queue):
+async def frontend_handler(websocket, queue):
     """Handles incoming connections from the frontend app."""
     client_addr = websocket.remote_address
     print(f"Frontend connected: {client_addr}")
