@@ -239,6 +239,21 @@ def distance(p1, p2):
     """Calculates Euclidean distance between two points."""
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
+def check_intersection(bbox1, bbox2):
+    """Checks if two bounding boxes (x, y, w, h) intersect."""
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+
+    # Calculate coordinates of the corners
+    left1, top1, right1, bottom1 = x1, y1, x1 + w1, y1 + h1
+    left2, top2, right2, bottom2 = x2, y2, x2 + w2, y2 + h2
+
+    # Check for non-intersection
+    if right1 < left2 or left1 > right2 or bottom1 < top2 or top1 > bottom2:
+        return False # No overlap
+    else:
+        return True # Overlap exists
+
 # --- End Helper Functions ---
 
 def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first_frame):
@@ -306,22 +321,36 @@ def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first
             dist_to_user = distance(user_center, other_center)
             
             x, y, w, h = bbox
+            # Determine color and thickness based on proximity and intersection
             if dist_to_user <= BUBBLE:
-                # Threat detected
-                cv2.rectangle(output_image, (x, y), (x + w, y + h), THREAT_COLOR, THREAT_THICKNESS)
-                threat_bboxes.append(bbox) # Add to threat list
-                text_color = (255, 255, 255) # White
+                # Potential threat - check for intersection (false positive)
+                if check_intersection(bbox, current_user_bbox):
+                    # False positive: Intersects with user - draw as user
+                    box_color = USER_COLOR
+                    box_thickness = NORMAL_THICKNESS
+                    is_threat = False
+                else:
+                    # True threat: Close but not intersecting - draw as threat
+                    box_color = THREAT_COLOR
+                    box_thickness = THREAT_THICKNESS
+                    is_threat = True
+                    threat_bboxes.append(bbox) # Add to threat list only if it's a true threat
             else:
-                # Normal box
-                cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
-                text_color = (255, 255, 255) # White
+                # Normal box: Not close to user
+                box_color = NORMAL_BOX_COLOR
+                box_thickness = NORMAL_THICKNESS
+                is_threat = False
 
-            # Add distance text near the center
+            # Draw the bounding box with determined style
+            cv2.rectangle(output_image, (x, y), (x + w, y + h), box_color, box_thickness)
+            
+            # Add distance text near the center (regardless of threat status)
             text = f"{dist_to_user:.0f}px"
             font_scale = 0.4
             font_thickness = 1
+            text_color = (255, 255, 255) # White
             # Position text slightly above the center for better visibility
-            text_pos = (int(other_center[0] - 5), int(other_center[1] - 5))
+            text_pos = (int(other_center[0] - 10), int(other_center[1] - 5)) # Adjusted x pos slightly
             cv2.putText(output_image, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 
                         font_scale, text_color, font_thickness, cv2.LINE_AA)
 
