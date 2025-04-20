@@ -89,7 +89,7 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                          break
                          
                     await websocket.send(json.dumps(message))
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(args.wait_time)
                     print(f"Sent frame {frame_count}")
                     sent_frame_counter += 1
                     
@@ -197,6 +197,7 @@ async def main():
     parser.add_argument("--frame-interval", type=int, default=25, help="Send every Nth frame (ignored if --frames is used)")
     parser.add_argument("--frames", type=str, default=None, 
                         help="Comma-separated list of specific frame numbers to send (e.g., '100,200,300'). Overrides --frame-interval.")
+    parser.add_argument("--wait-time", type=int, default=1, help="Wait time between frames in seconds")
     
     args = parser.parse_args()
     
