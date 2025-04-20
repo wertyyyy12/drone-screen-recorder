@@ -549,6 +549,7 @@ async def process_client_frames(websocket, queue, save_dir, threat_save_dir, cro
                             
                             # Put data onto the queue
                             await queue.put(threat_data)
+                            await asyncio.sleep(args.buffer_interval)
                             print(f"Buffered data for frame {frame_number}. Threats found: {len(threat_centers) > 0}")
                         
                         except Exception as buffer_err:
@@ -613,7 +614,10 @@ async def main():
                         help="Host address for this server to listen on for frontend connections (default: 0.0.0.0)")
     parser.add_argument("--frontend-port", type=int, default=8766, # Different default from client
                         help="Port for this server to listen on for frontend connections (default: 8766)")
+    parser.add_argument("--buffer-interval", type=float, default=1,
+                        help="Buffer interval in seconds between threat data frames (default: 10)")
     
+    global args
     args = parser.parse_args()
         
     save_dir = Path(args.save_dir)
