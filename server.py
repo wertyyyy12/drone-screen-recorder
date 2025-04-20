@@ -4,11 +4,18 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+import math # Added for distance calculation
 
 import cv2
 import numpy as np
 import websockets
 
+USER_COLOR = (0, 255, 0) # Green
+NORMAL_BOX_COLOR = (255, 0, 0) # Blue
+THREAT_COLOR = (0, 0, 255) # Red
+THREAT_THICKNESS = 3
+NORMAL_THICKNESS = 2
+BUBBLE = 50 # Proximity threshold in pixels
 
 def preprocess_image(image, threshold=200):
     """
@@ -177,18 +184,17 @@ def draw_detections(original_image, detections, use_contours):
                          
     return result_image
 
-def draw_boxes_around_white_regions(target_image_to_draw_on, binary_image, min_area=10):
+def draw_boxes_around_white_regions(binary_image, min_area=10):
     """
     Finds white regions in a binary image (typically inverted preprocessed) 
-    and draws bounding boxes around them on a target image.
+    and returns their bounding boxes.
 
     Args:
-        target_image_to_draw_on: The image (e.g., original) where boxes will be drawn.
         binary_image: The black and white image (BGR format expected, white=object).
         min_area: Minimum pixel area to consider a region valid (filters noise).
 
     Returns:
-        Tuple: (Image with bounding boxes drawn, list of bounding boxes (x,y,w,h))
+        List of bounding boxes [(x, y, w, h)]
     """
     
     # 1. Ensure grayscale
@@ -202,9 +208,6 @@ def draw_boxes_around_white_regions(target_image_to_draw_on, binary_image, min_a
     # 2. Find connected components and stats
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(gray_binary, connectivity=8)
 
-    output_image = target_image_to_draw_on.copy()
-    box_color = (255, 0, 0) # Blue color for boxes
-    thickness = 2
     detections = [] # Store bounding boxes found
 
     # 3. Iterate through components (skip label 0, which is the background)
@@ -218,31 +221,123 @@ def draw_boxes_around_white_regions(target_image_to_draw_on, binary_image, min_a
 
         # 5. Filter small noise areas
         if area >= min_area:
-            # 6. Draw bounding box
-            cv2.rectangle(output_image, (x, y), (x + w, y + h), box_color, thickness)
-            detections.append((x, y, w, h)) # Store the box
+            # 6. Store the box
+            detections.append((x, y, w, h)) 
             
     #print(f"Found {len(detections)} white regions (originally black) above min_area {min_area}")
-    return output_image, detections
+    return detections
 
-async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
+# --- Helper Functions for Threat Detection ---
+
+def bbox_center(bbox):
+    """Calculates the center of a bounding box (x, y, w, h)."""
+    x, y, w, h = bbox
+    return (x + w / 2, y + h / 2)
+
+def distance(p1, p2):
+    """Calculates Euclidean distance between two points."""
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+
+# --- End Helper Functions ---
+
+def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first_frame):
+    """
+    Identifies the user, tracks them, detects threats, and draws boxes.
+
+    Args:
+        original_img: The image to draw on.
+        all_bboxes: List of detected bounding boxes [(x, y, w, h)] for this frame.
+        prev_user_bbox: The user's bounding box (x, y, w, h) from the previous frame.
+        is_first_frame: Boolean flag indicating if this is the first frame.
+
+    Returns:
+        Tuple: (Image with boxes drawn, identified user_bbox for this frame or None)
+    """
+    output_image = original_img.copy()
+    current_user_bbox = None
+
+    if not all_bboxes:
+        return output_image, None # No boxes detected
+
+    # 1. Identify or Track User
+    if is_first_frame or prev_user_bbox is None:
+        # First frame or lost track: User is the largest box
+        largest_area = -1
+        for bbox in all_bboxes:
+            x, y, w, h = bbox
+            area = w * h
+            if area > largest_area:
+                largest_area = area
+                current_user_bbox = bbox
+    else:
+        # Subsequent frames: Find box closest to previous user center
+        min_dist = float('inf')
+        prev_center = bbox_center(prev_user_bbox)
+        tracked = False
+        for bbox in all_bboxes:
+            current_center = bbox_center(bbox)
+            dist = distance(prev_center, current_center)
+            if dist < min_dist:
+                min_dist = dist
+                current_user_bbox = bbox
+                tracked = True
+        if not tracked:
+             # Fallback if no boxes were found (shouldn't happen if all_bboxes is not empty)
+             # Or maybe add a max distance threshold for tracking?
+             current_user_bbox = None # Consider user lost
+
+    # 2. Draw Boxes (User, Threats, Normal)
+    if current_user_bbox:
+        user_center = bbox_center(current_user_bbox)
+        # Draw user box first
+        ux, uy, uw, uh = current_user_bbox
+        cv2.rectangle(output_image, (ux, uy), (ux + uw, uy + uh), USER_COLOR, NORMAL_THICKNESS)
+
+        # Draw other boxes and check for threats
+        for bbox in all_bboxes:
+            if bbox == current_user_bbox:
+                continue # Skip the user box, already drawn
+
+            other_center = bbox_center(bbox)
+            dist_to_user = distance(user_center, other_center)
+            
+            x, y, w, h = bbox
+            if dist_to_user <= BUBBLE:
+                # Threat detected
+                cv2.rectangle(output_image, (x, y), (x + w, y + h), THREAT_COLOR, THREAT_THICKNESS)
+            else:
+                # Normal box
+                cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
+    else:
+        # No user identified in this frame, draw all boxes normally
+        for bbox in all_bboxes:
+             x, y, w, h = bbox
+             cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
+
+    return output_image, current_user_bbox
+
+async def save_frame(frame_data, frame_number, save_dir, 
+                   prev_user_bbox, is_first_frame, # Added for threat detection state
+                   crop_coords=None, use_contours=False, preprocess=False, threshold=200):
     """
     Process and save a received frame. 
-    If preprocess=True, finds regions below threshold and draws boxes on original.
-    If preprocess=False, runs blob/contour detection and draws on original.
+    If preprocess=True, finds regions below threshold, performs threat detection, 
+    and draws boxes on original.
     
     Args:
         frame_data: Base64 encoded image data
         frame_number: Frame number from the video
         save_dir: Directory to save frames to
+        prev_user_bbox: User's bounding box from the previous frame (for tracking).
+        is_first_frame: Flag indicating if this is the first frame processed.
         crop_coords: Optional tuple (x1, y1, x2, y2) for cropping
         use_contours: If preprocess=False, use contour detection instead of blob detection.
         preprocess: Whether to apply inverted preprocessing and find dark regions.
         threshold: Brightness threshold for preprocessing.
         
     Returns:
-        Tuple(filepath, detections) or None if processing failed. Detections are
-        contours/keypoints if preprocess=False, bounding boxes if preprocess=True.
+        Tuple(filepath, current_user_bbox) or (None, None) if processing failed. 
+        current_user_bbox is the bbox identified as the user in this frame.
     """
     try:
         # Decode the base64 image data
@@ -253,7 +348,7 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
         original_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if original_img is None:
             print(f"Error: Failed to decode image data for frame {frame_number}")
-            return None, []
+            return None, None
         
         # Apply cropping if coordinates are provided
         if crop_coords and len(crop_coords) == 4:
@@ -269,7 +364,8 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
         filename = f"frame_{frame_number:06d}.jpg"
         filepath = save_dir / filename
         
-        detections = []
+        current_user_bbox = None # Specific to this frame
+        detections = [] # General detections list
         img_to_save = original_img.copy() # Start with the original image
         
         if preprocess:
@@ -283,8 +379,14 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
             # else:
                 # print(f"Saved inverted preprocessed frame to {preprocessed_filepath}") # Reduced verbosity
             
-            # Find white regions (originally black) and draw boxes on original image
-            img_to_save, detections = draw_boxes_around_white_regions(original_img, preprocessed_inv_img)
+            # Find white regions (originally black)
+            all_bboxes = draw_boxes_around_white_regions(preprocessed_inv_img)
+            
+            # Identify user, track, detect threats, and draw boxes
+            img_to_save, current_user_bbox = identify_and_draw_threats(
+                original_img, all_bboxes, prev_user_bbox, is_first_frame
+            )
+            detections = all_bboxes # Store raw boxes as detections for this mode
 
         else:
             # Standard detection (blob or contour) on the original image
@@ -303,18 +405,19 @@ async def save_frame(frame_data, frame_number, save_dir, crop_coords=None, use_c
         # Save the final image (original + appropriate detections/boxes)
         if not cv2.imwrite(str(filepath), img_to_save):
             print(f"Error: Failed to save final image {filepath}")
-            return None, detections # Return detections even if save failed
+            return None, None # Return None for both if save failed
         # else:
              # Add log for successful save of final image
              # print(f"Saved final annotated frame {frame_number} to {filepath}") # Reduced verbosity
 
-        return filepath, detections
+        # Return the path and the user bbox found in *this* frame
+        return filepath, current_user_bbox 
         
     except Exception as e:
         print(f"Error processing frame {frame_number}: {e}")
         import traceback
         traceback.print_exc()
-        return None, []
+        return None, None
 
 async def process_client_frames(websocket, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
     """Receive frames from the client, process them, and send ACKs."""
@@ -322,6 +425,9 @@ async def process_client_frames(websocket, save_dir, crop_coords=None, use_conto
     print(f"Processing frames from client: {client_addr}")
     frames_processed = 0
     frames_failed = 0
+    # State for threat detection/user tracking
+    user_bbox = None 
+    is_first_frame = True
 
     try:
         async for message in websocket:
@@ -337,11 +443,18 @@ async def process_client_frames(websocket, save_dir, crop_coords=None, use_conto
                     continue
                 
                 # Process and Save the frame
-                filepath, detections = await save_frame(
+                filepath, current_user_bbox = await save_frame(
                     frame_data, frame_number, save_dir, 
+                    user_bbox, is_first_frame, # Pass state to save_frame
                     crop_coords, use_contours, preprocess, threshold
                 )
                 
+                # Update tracking state for the next frame
+                if filepath: # Only update if processing was successful
+                    user_bbox = current_user_bbox # Update user_bbox for the next iteration
+                    if is_first_frame:
+                        is_first_frame = False # No longer the first frame
+
                 # Send acknowledgment back to client
                 if filepath:
                     ack_message = json.dumps({"status": "processed", "frame_number": frame_number})
@@ -392,12 +505,12 @@ async def main():
     parser.add_argument("--crop-y2", type=int, default=1527, help="Bottom coordinate for cropping (default: 1527)")
     parser.add_argument("--no-crop", action="store_true", help="Disable cropping")
     # Removed --detect flag
-    parser.add_argument("--use-contours", action="store_true", 
+    parser.add_argument("--use-contours", action="store_true", default=True,
                         help="Use contour detection instead of the default blob detection (ignored if --preprocess is used).")
-    parser.add_argument("--preprocess", action="store_true",
+    parser.add_argument("--preprocess", action="store_true", default=True,
                         help="Apply inverted thresholding and find dark regions, drawing boxes on original image.")
-    parser.add_argument("--threshold", type=int, default=200,
-                        help="Brightness threshold for preprocessing (0-255, default: 200)")
+    parser.add_argument("--threshold", type=int, default=150,
+                        help="Brightness threshold for preprocessing (0-255, default: 150)")
     
     args = parser.parse_args()
         
