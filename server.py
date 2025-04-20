@@ -15,7 +15,7 @@ NORMAL_BOX_COLOR = (255, 0, 0) # Blue
 THREAT_COLOR = (0, 0, 255) # Red
 THREAT_THICKNESS = 3
 NORMAL_THICKNESS = 2
-BUBBLE = 50 # Proximity threshold in pixels
+BUBBLE = 300 # Proximity threshold in pixels
 
 def preprocess_image(image, threshold=200):
     """
@@ -305,9 +305,23 @@ def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first
             if dist_to_user <= BUBBLE:
                 # Threat detected
                 cv2.rectangle(output_image, (x, y), (x + w, y + h), THREAT_COLOR, THREAT_THICKNESS)
+                color = THREAT_COLOR # Use threat color for text too? Maybe white is better for contrast.
+                text_color = (255, 255, 255) # White
             else:
                 # Normal box
                 cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
+                color = NORMAL_BOX_COLOR
+                text_color = (255, 255, 255) # White
+
+            # Add distance text near the center
+            text = f"{dist_to_user:.0f}px"
+            font_scale = 0.4
+            font_thickness = 1
+            # Position text slightly above the center for better visibility
+            text_pos = (int(other_center[0] - 5), int(other_center[1] - 5))
+            cv2.putText(output_image, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 
+                        font_scale, text_color, font_thickness, cv2.LINE_AA)
+
     else:
         # No user identified in this frame, draw all boxes normally
         for bbox in all_bboxes:
