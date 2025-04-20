@@ -519,7 +519,6 @@ async def process_client_frames(websocket, queue, save_dir, threat_save_dir, cro
                             }
                             
                             # Put data onto the queue
-                            print(threat_data)
                             await queue.put(threat_data)
                             print(f"Buffered data for frame {frame_number}. Threats found: {len(threat_centers) > 0}")
                         
