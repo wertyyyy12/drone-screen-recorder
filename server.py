@@ -5,6 +5,7 @@ import base64
 import json
 from pathlib import Path
 import math # Added for distance calculation
+import functools # For partial application
 
 import cv2
 import numpy as np
@@ -15,7 +16,7 @@ NORMAL_BOX_COLOR = (255, 0, 0) # Blue
 THREAT_COLOR = (0, 0, 255) # Red
 THREAT_THICKNESS = 3
 NORMAL_THICKNESS = 2
-BUBBLE = 300 # Proximity threshold in pixels
+BUBBLE = 350 # Proximity threshold in pixels
 
 def preprocess_image(image, threshold=200):
     """
@@ -251,13 +252,16 @@ def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first
         is_first_frame: Boolean flag indicating if this is the first frame.
 
     Returns:
-        Tuple: (Image with boxes drawn, identified user_bbox for this frame or None)
+        Tuple: (Image with boxes drawn, 
+                identified user_bbox for this frame or None, 
+                list of threat bboxes [(x, y, w, h)])
     """
     output_image = original_img.copy()
     current_user_bbox = None
+    threat_bboxes = [] # List to store threat bboxes
 
     if not all_bboxes:
-        return output_image, None # No boxes detected
+        return output_image, None, [] # No boxes detected
 
     # 1. Identify or Track User
     if is_first_frame or prev_user_bbox is None:
@@ -305,12 +309,11 @@ def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first
             if dist_to_user <= BUBBLE:
                 # Threat detected
                 cv2.rectangle(output_image, (x, y), (x + w, y + h), THREAT_COLOR, THREAT_THICKNESS)
-                color = THREAT_COLOR # Use threat color for text too? Maybe white is better for contrast.
+                threat_bboxes.append(bbox) # Add to threat list
                 text_color = (255, 255, 255) # White
             else:
                 # Normal box
                 cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
-                color = NORMAL_BOX_COLOR
                 text_color = (255, 255, 255) # White
 
             # Add distance text near the center
@@ -328,7 +331,8 @@ def identify_and_draw_threats(original_img, all_bboxes, prev_user_bbox, is_first
              x, y, w, h = bbox
              cv2.rectangle(output_image, (x, y), (x + w, y + h), NORMAL_BOX_COLOR, NORMAL_THICKNESS)
 
-    return output_image, current_user_bbox
+    # Return the annotated image, the user's bbox, and the list of threat bboxes
+    return output_image, current_user_bbox, threat_bboxes
 
 async def save_frame(frame_data, frame_number, save_dir, 
                    prev_user_bbox, is_first_frame, # Added for threat detection state
@@ -350,9 +354,13 @@ async def save_frame(frame_data, frame_number, save_dir,
         threshold: Brightness threshold for preprocessing.
         
     Returns:
-        Tuple(filepath, current_user_bbox) or (None, None) if processing failed. 
-        current_user_bbox is the bbox identified as the user in this frame.
+        Tuple(filepath, current_user_bbox, threat_bboxes, img_to_save) or (None, None, [], None)
+        - filepath: Path where the annotated image was saved.
+        - current_user_bbox: Bbox identified as the user in this frame.
+        - threat_bboxes: List of bboxes identified as threats.
+        - img_to_save: The numpy array of the final annotated image (needed for sending).
     """
+    img_to_save = None # Initialize here
     try:
         # Decode the base64 image data
         img_data = base64.b64decode(frame_data)
@@ -362,7 +370,7 @@ async def save_frame(frame_data, frame_number, save_dir,
         original_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         if original_img is None:
             print(f"Error: Failed to decode image data for frame {frame_number}")
-            return None, None
+            return None, None, [], None
         
         # Apply cropping if coordinates are provided
         if crop_coords and len(crop_coords) == 4:
@@ -380,6 +388,7 @@ async def save_frame(frame_data, frame_number, save_dir,
         
         current_user_bbox = None # Specific to this frame
         detections = [] # General detections list
+        threat_bboxes = [] # Specific to threat detection mode
         img_to_save = original_img.copy() # Start with the original image
         
         if preprocess:
@@ -397,7 +406,7 @@ async def save_frame(frame_data, frame_number, save_dir,
             all_bboxes = draw_boxes_around_white_regions(preprocessed_inv_img)
             
             # Identify user, track, detect threats, and draw boxes
-            img_to_save, current_user_bbox = identify_and_draw_threats(
+            img_to_save, current_user_bbox, threat_bboxes = identify_and_draw_threats(
                 original_img, all_bboxes, prev_user_bbox, is_first_frame
             )
             detections = all_bboxes # Store raw boxes as detections for this mode
@@ -419,22 +428,22 @@ async def save_frame(frame_data, frame_number, save_dir,
         # Save the final image (original + appropriate detections/boxes)
         if not cv2.imwrite(str(filepath), img_to_save):
             print(f"Error: Failed to save final image {filepath}")
-            return None, None # Return None for both if save failed
+            return None, None, [], None # Return None for all if save failed
         # else:
              # Add log for successful save of final image
              # print(f"Saved final annotated frame {frame_number} to {filepath}") # Reduced verbosity
 
-        # Return the path and the user bbox found in *this* frame
-        return filepath, current_user_bbox 
+        # Return the path, user bbox, threat list, and the image array itself
+        return filepath, current_user_bbox, threat_bboxes, img_to_save
         
     except Exception as e:
         print(f"Error processing frame {frame_number}: {e}")
         import traceback
         traceback.print_exc()
-        return None, None
+        return None, None, [], None
 
-async def process_client_frames(websocket, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
-    """Receive frames from the client, process them, and send ACKs."""
+async def process_client_frames(websocket, queue, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
+    """Receive frames from the client, process them, send ACKs, and put threat data into the queue."""
     client_addr = websocket.remote_address
     print(f"Processing frames from client: {client_addr}")
     frames_processed = 0
@@ -457,7 +466,7 @@ async def process_client_frames(websocket, save_dir, crop_coords=None, use_conto
                     continue
                 
                 # Process and Save the frame
-                filepath, current_user_bbox = await save_frame(
+                filepath, current_user_bbox, threat_bboxes, img_to_save = await save_frame(
                     frame_data, frame_number, save_dir, 
                     user_bbox, is_first_frame, # Pass state to save_frame
                     crop_coords, use_contours, preprocess, threshold
@@ -468,12 +477,46 @@ async def process_client_frames(websocket, save_dir, crop_coords=None, use_conto
                     user_bbox = current_user_bbox # Update user_bbox for the next iteration
                     if is_first_frame:
                         is_first_frame = False # No longer the first frame
-
+                
                 # Send acknowledgment back to client
                 if filepath:
                     ack_message = json.dumps({"status": "processed", "frame_number": frame_number})
                     frames_processed += 1
-                else:
+
+                    # --- Buffer Threat Data --- 
+                    # Only buffer if preprocessing is enabled, a user is identified, and threats exist
+                    if preprocess and queue and current_user_bbox and threat_bboxes:
+                        try:
+                            # Encode the annotated image to base64
+                            _, buffer = cv2.imencode('.jpg', img_to_save)
+                            img_base64 = base64.b64encode(buffer).decode('utf-8')
+                            
+                            # Get centers
+                            user_center = list(map(int, bbox_center(current_user_bbox)))
+                            threat_centers = [list(map(int, bbox_center(tb))) for tb in threat_bboxes]
+
+                            # Construct message
+                            threat_data = {
+                                "user_center": user_center,
+                                "threat_center": threat_centers,
+                                "img": img_base64,
+                                "frame_number": frame_number # Include frame number for context
+                            }
+                            
+                            # Put data onto the queue
+                            await queue.put(threat_data)
+                            print(f"Buffered threat data for frame {frame_number}.")
+                        
+                        # Remove websocket specific exceptions here, queue errors are different
+                        # except websockets.exceptions.ConnectionClosed:
+                        #     print(f"Frontend connection closed while trying to send threat data for frame {frame_number}.")
+                        #     queue = None # Stop trying to send
+                        except Exception as fe_send_err: # Rename? This is now queue error
+                            print(f"Warning: Error buffering threat data for frame {frame_number}: {fe_send_err}")
+                            # Queue errors (like full queue if maxsize set) might need handling
+                    # --- End Buffer Threat Data ---
+
+                else: # Processing failed
                     ack_message = json.dumps({"status": "error", "frame_number": frame_number, "message": "Processing failed"})
                     frames_failed += 1
                     print(f"Failed to process frame {frame_number} from {client_addr}")
@@ -525,6 +568,10 @@ async def main():
                         help="Apply inverted thresholding and find dark regions, drawing boxes on original image.")
     parser.add_argument("--threshold", type=int, default=150,
                         help="Brightness threshold for preprocessing (0-255, default: 150)")
+    parser.add_argument("--frontend-host", type=str, default="0.0.0.0",
+                        help="Host address for this server to listen on for frontend connections (default: 0.0.0.0)")
+    parser.add_argument("--frontend-port", type=int, default=8766, # Different default from client
+                        help="Port for this server to listen on for frontend connections (default: 8766)")
     
     args = parser.parse_args()
         
@@ -548,8 +595,38 @@ async def main():
     client_url = f"ws://{args.client_host}:{args.client_port}"
     print(f"Attempting to connect to client at {client_url}...")
     print(f"Frames will be saved to {save_dir.absolute()}")
+    print(f"Will listen for frontend connections on ws://{args.frontend_host}:{args.frontend_port}")
 
-    while True: # Keep trying to connect
+    # Create the shared buffer queue
+    threat_buffer_queue = asyncio.Queue()
+
+    # Define the task for connecting to the frame client and processing
+    client_connection_task = connect_and_process_client(
+        client_url, threat_buffer_queue, save_dir, crop_coords, 
+        args.use_contours, args.preprocess, args.threshold
+    )
+
+    # Define the task for serving the frontend
+    # Use partial to pass the queue to the handler
+    handler_with_queue = functools.partial(frontend_handler, queue=threat_buffer_queue)
+    frontend_server_task = websockets.serve(
+        handler_with_queue, 
+        args.frontend_host, 
+        args.frontend_port
+    )
+
+    print("Starting client connection handler and frontend server...")
+    # Run both concurrently
+    await asyncio.gather(
+        client_connection_task, 
+        frontend_server_task
+    )
+    print("Server tasks finished.")
+
+
+async def connect_and_process_client(client_url, queue, save_dir, crop_coords, use_contours, preprocess, threshold):
+    """Continuously tries to connect to the client and process frames."""
+    while True: # Keep trying to connect to the client
         try:
             async with websockets.connect(
                 client_url,
@@ -558,23 +635,76 @@ async def main():
                 open_timeout=5 # Shorter connection timeout
             ) as websocket:
                 print(f"Connected to client at {client_url}")
+                
+                # Pass the queue instead of a frontend_websocket object
                 await process_client_frames(
-                    websocket, save_dir, crop_coords, 
-                    args.use_contours, args.preprocess, args.threshold
+                    websocket, # Client connection
+                    queue,    # Threat buffer queue
+                    save_dir, crop_coords, 
+                    use_contours, preprocess, threshold
                 )
-                print("Finished processing client frames. Server exiting.")
-                break # Exit loop after successful processing
+                print("Finished processing client frames session. Waiting for client disconnect/reconnect...")
+                # Let the connection close gracefully or wait for next attempt
+                break
+                # await websocket.wait_closed() # Wait until connection is closed
 
         except (ConnectionRefusedError, asyncio.TimeoutError, websockets.exceptions.InvalidURI, OSError) as e:
-            print(f"Connection failed: {e}. Retrying in 5 seconds...")
+            print(f"Client connection failed: {e}. Retrying in 5 seconds...")
             await asyncio.sleep(5)
+        except websockets.exceptions.ConnectionClosed:
+             print("Client connection closed unexpectedly. Retrying in 5 seconds...")
+             await asyncio.sleep(5)
         except Exception as e:
-            print(f"An unexpected error occurred during connection/processing: {e}")
+            print(f"An unexpected error occurred during client connection/processing loop: {e}")
             import traceback
             traceback.print_exc()
-            print("Retrying in 10 seconds...")
+            print("Retrying client connection in 10 seconds...")
             await asyncio.sleep(10)
+
+# --- Frontend Handler --- 
+async def frontend_handler(websocket, path, queue):
+    """Handles incoming connections from the frontend app."""
+    client_addr = websocket.remote_address
+    print(f"Frontend connected: {client_addr}")
+    try:
+        # Continuously check the queue and send data to this frontend client
+        while True:
+            threat_data = await queue.get() # Wait for an item from the buffer
+            try:
+                await websocket.send(json.dumps(threat_data))
+                print(f"Sent buffered threat data frame {threat_data.get('frame_number', 'N/A')} to frontend {client_addr}")
+                queue.task_done() # Acknowledge processing
+            except websockets.exceptions.ConnectionClosed:
+                print(f"Frontend connection {client_addr} closed while trying to send. Requeuing data.")
+                # Basic requeue: Put the item back at the end. Might cause infinite loop if connection is broken.
+                # A more robust solution might involve dead-letter queues or discarding.
+                await queue.put(threat_data) 
+                break # Exit inner loop for this client
+            except Exception as send_err:
+                print(f"Error sending to frontend {client_addr}: {send_err}. Data may be lost for this client.")
+                # Decide if we should requeue or discard
+                queue.task_done() # Mark as done even if send failed for this client to avoid blocking others
+
+    except websockets.exceptions.ConnectionClosedOK:
+        print(f"Frontend {client_addr} disconnected normally.")
+    except websockets.exceptions.ConnectionClosedError as e:
+        print(f"Frontend {client_addr} disconnected with error: {e}")
+    except Exception as e:
+        print(f"Error in frontend handler for {client_addr}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print(f"Frontend connection closed for {client_addr}.")
+# --- End Frontend Handler ---
 
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    # Wrap the main logic in asyncio.run
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nServer shutting down gracefully.")
+    except Exception as e:
+        print(f"\nCritical error in main execution: {e}")
+        import traceback
+        traceback.print_exc() 
