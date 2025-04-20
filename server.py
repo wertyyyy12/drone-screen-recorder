@@ -185,7 +185,7 @@ def draw_detections(original_image, detections, use_contours):
                          
     return result_image
 
-def draw_boxes_around_white_regions(binary_image, min_area=144):
+def draw_boxes_around_white_regions(binary_image, min_area=1000):
     """
     Finds white regions in a binary image (typically inverted preprocessed) 
     and returns their bounding boxes.
@@ -483,27 +483,30 @@ async def process_client_frames(websocket, queue, save_dir, threat_save_dir, cro
                     ack_message = json.dumps({"status": "processed", "frame_number": frame_number})
                     frames_processed += 1
 
-                    # --- Buffer Threat Data --- 
-                    # Only buffer if preprocessing is enabled, a user is identified, and threats exist
-                    if preprocess and queue and current_user_bbox and threat_bboxes:
-                        # --- Save Threat Frame --- 
-                        try:
-                            threat_filename = f"threat_frame_{frame_number:06d}.jpg"
-                            threat_filepath = threat_save_dir / threat_filename
-                            if not cv2.imwrite(str(threat_filepath), img_to_save):
-                                print(f"Error: Failed to save threat frame image {threat_filepath}")
-                            #else: # Optional success log
-                                #print(f"Saved threat frame image to {threat_filepath}")
-                        except Exception as save_err:
-                             print(f"Exception saving threat frame image for frame {frame_number}: {save_err}")
+                    # --- Buffer Threat Data and Save Threat Frame --- 
+                    # Buffer if preprocessing is enabled and a user is identified.
+                    # Save frame copy only if threats were actually detected.
+                    if preprocess and queue and current_user_bbox:
+                        # --- Save Threat Frame (only if threats exist) --- 
+                        if threat_bboxes:
+                            try:
+                                threat_filename = f"threat_frame_{frame_number:06d}.jpg"
+                                threat_filepath = threat_save_dir / threat_filename
+                                if not cv2.imwrite(str(threat_filepath), img_to_save):
+                                    print(f"Error: Failed to save threat frame image {threat_filepath}")
+                                #else: # Optional success log
+                                    #print(f"Saved threat frame image to {threat_filepath}")
+                            except Exception as save_err:
+                                print(f"Exception saving threat frame image for frame {frame_number}: {save_err}")
                         # --- End Save Threat Frame ---
                         
+                        # --- Buffer Data (always if user identified) ---
                         try:
                             # Encode the annotated image to base64
                             _, buffer = cv2.imencode('.jpg', img_to_save)
                             img_base64 = base64.b64encode(buffer).decode('utf-8')
                             
-                            # Get centers
+                            # Get centers (threat_centers will be empty if threat_bboxes is empty)
                             user_center = list(map(int, bbox_center(current_user_bbox)))
                             threat_centers = [list(map(int, bbox_center(tb))) for tb in threat_bboxes]
 
@@ -512,21 +515,18 @@ async def process_client_frames(websocket, queue, save_dir, threat_save_dir, cro
                                 "user_center": user_center,
                                 "threat_centers": threat_centers,
                                 "frame_number": frame_number, # Include frame number for context
-                                "image_data": img_base64
+                                # "image_data": img_base64
                             }
                             
                             # Put data onto the queue
+                            print(threat_data)
                             await queue.put(threat_data)
-                            print(f"Buffered threat data for frame {frame_number}.")
+                            print(f"Buffered data for frame {frame_number}. Threats found: {len(threat_centers) > 0}")
                         
-                        # Remove websocket specific exceptions here, queue errors are different
-                        # except websockets.exceptions.ConnectionClosed:
-                        #     print(f"Frontend connection closed while trying to send threat data for frame {frame_number}.")
-                        #     queue = None # Stop trying to send
-                        except Exception as fe_send_err: # Rename? This is now queue error
-                            print(f"Warning: Error buffering threat data for frame {frame_number}: {fe_send_err}")
+                        except Exception as buffer_err:
+                            print(f"ERROR buffering threat data for frame {frame_number}: {buffer_err}")
                             # Queue errors (like full queue if maxsize set) might need handling
-                    # --- End Buffer Threat Data ---
+                    # --- End Buffer Threat Data and Save Threat Frame ---
 
                 else: # Processing failed
                     ack_message = json.dumps({"status": "error", "frame_number": frame_number, "message": "Processing failed"})
