@@ -90,7 +90,6 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                          
                     await websocket.send(json.dumps(message))
                     await asyncio.sleep(args.wait_time)
-                    print(f"Sent frame {frame_count}")
                     sent_frame_counter += 1
                     
                     # Wait for acknowledgment
@@ -99,16 +98,6 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                         ack_message = await asyncio.wait_for(websocket.recv(), timeout=20.0) 
                         ack_data = json.loads(ack_message)
                         
-                        if ack_data.get("status") == "processed" and ack_data.get("frame_number") == frame_count:
-                            print(f"Received acknowledgment for frame {frame_count}")
-                        elif ack_data.get("status") == "error":
-                            print(f"Server error for frame {frame_count}: {ack_data.get('message', 'Unknown error')}")
-                            # Optionally stop on server error
-                            # break 
-                        else:
-                            print(f"Warning: Received unexpected acknowledgment: {ack_data}")
-                            # Optionally stop on unexpected ACK
-                            # break 
                             
                     except asyncio.TimeoutError:
                         print(f"Error: Timeout waiting for acknowledgment for frame {frame_count}. Stopping.")

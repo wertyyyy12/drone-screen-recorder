@@ -751,7 +751,6 @@ async def frontend_handler(websocket, queue):
             threat_data = await queue.get() # Wait for an item from the buffer
             try:
                 await websocket.send(json.dumps(threat_data))
-                print(f"Sent buffered threat data frame {threat_data.get('frame_number', 'N/A')} to frontend {client_addr}")
                 queue.task_done() # Acknowledge processing
             except websockets.exceptions.ConnectionClosed:
                 print(f"Frontend connection {client_addr} closed while trying to send. Requeuing data.")
