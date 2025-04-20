@@ -185,7 +185,7 @@ def draw_detections(original_image, detections, use_contours):
                          
     return result_image
 
-def draw_boxes_around_white_regions(binary_image, min_area=10):
+def draw_boxes_around_white_regions(binary_image, min_area=144):
     """
     Finds white regions in a binary image (typically inverted preprocessed) 
     and returns their bounding boxes.
@@ -442,8 +442,8 @@ async def save_frame(frame_data, frame_number, save_dir,
         traceback.print_exc()
         return None, None, [], None
 
-async def process_client_frames(websocket, queue, save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
-    """Receive frames from the client, process them, send ACKs, and put threat data into the queue."""
+async def process_client_frames(websocket, queue, save_dir, threat_save_dir, crop_coords=None, use_contours=False, preprocess=False, threshold=200):
+    """Receive frames from the client, process them, send ACKs, put threat data into the queue, and save threat frames."""
     client_addr = websocket.remote_address
     print(f"Processing frames from client: {client_addr}")
     frames_processed = 0
@@ -486,6 +486,18 @@ async def process_client_frames(websocket, queue, save_dir, crop_coords=None, us
                     # --- Buffer Threat Data --- 
                     # Only buffer if preprocessing is enabled, a user is identified, and threats exist
                     if preprocess and queue and current_user_bbox and threat_bboxes:
+                        # --- Save Threat Frame --- 
+                        try:
+                            threat_filename = f"threat_frame_{frame_number:06d}.jpg"
+                            threat_filepath = threat_save_dir / threat_filename
+                            if not cv2.imwrite(str(threat_filepath), img_to_save):
+                                print(f"Error: Failed to save threat frame image {threat_filepath}")
+                            #else: # Optional success log
+                                #print(f"Saved threat frame image to {threat_filepath}")
+                        except Exception as save_err:
+                             print(f"Exception saving threat frame image for frame {frame_number}: {save_err}")
+                        # --- End Save Threat Frame ---
+                        
                         try:
                             # Encode the annotated image to base64
                             _, buffer = cv2.imencode('.jpg', img_to_save)
@@ -555,7 +567,9 @@ async def main():
     parser.add_argument("--client-host", type=str, default="localhost", help="Client host address to connect to (default: localhost)")
     parser.add_argument("--client-port", type=int, default=8765, help="Client port to connect to (default: 8765)")
     parser.add_argument("--save-dir", type=str, default="./files/frames", 
-                        help="Directory to save frames (default: ./files/frames)")
+                        help="Directory to save ALL processed frames (default: ./files/frames)")
+    parser.add_argument("--threat-frame-dir", type=str, default="./files/threat_frames",
+                        help="Directory to save ONLY frames containing detected threats (default: ./files/threat_frames)")
     parser.add_argument("--crop-x1", type=int, default=108, help="Left coordinate for cropping (default: 108)")
     parser.add_argument("--crop-y1", type=int, default=359, help="Top coordinate for cropping (default: 359)")
     parser.add_argument("--crop-x2", type=int, default=984, help="Right coordinate for cropping (default: 984)")
@@ -576,6 +590,8 @@ async def main():
         
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    threat_save_dir = Path(args.threat_frame_dir) # New directory for threat frames
+    threat_save_dir.mkdir(parents=True, exist_ok=True)
     
     crop_coords = None
     if not args.no_crop:
@@ -609,7 +625,9 @@ async def main():
     print("Starting client connection handler...")
     try:
         await connect_and_process_client(
-            client_url, threat_buffer_queue, save_dir, crop_coords, 
+            client_url, threat_buffer_queue, 
+            save_dir, threat_save_dir, # Pass both directories
+            crop_coords, 
             args.use_contours, args.preprocess, args.threshold
         )
         print("Client connection handler finished normally.")
@@ -651,7 +669,7 @@ async def main():
     print("Shutdown complete.")
 
 
-async def connect_and_process_client(client_url, queue, save_dir, crop_coords, use_contours, preprocess, threshold):
+async def connect_and_process_client(client_url, queue, save_dir, threat_save_dir, crop_coords, use_contours, preprocess, threshold):
     """Continuously tries to connect to the client and process frames."""
     while True: # Keep trying to connect to the client
         try:
@@ -667,7 +685,9 @@ async def connect_and_process_client(client_url, queue, save_dir, crop_coords, u
                 await process_client_frames(
                     websocket, # Client connection
                     queue,    # Threat buffer queue
-                    save_dir, crop_coords, 
+                    save_dir, # Directory for all frames
+                    threat_save_dir, # Directory for threat frames
+                    crop_coords, 
                     use_contours, preprocess, threshold
                 )
                 print("Finished processing client frames session. Waiting for client disconnect/reconnect...")
