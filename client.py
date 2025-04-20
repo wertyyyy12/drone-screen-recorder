@@ -89,6 +89,7 @@ async def send_frames(websocket, video_path, crop_top, crop_bottom, frame_interv
                          break
                          
                     await websocket.send(json.dumps(message))
+                    await asyncio.sleep(1)
                     print(f"Sent frame {frame_count}")
                     sent_frame_counter += 1
                     

@@ -499,7 +499,8 @@ async def process_client_frames(websocket, queue, save_dir, crop_coords=None, us
                             threat_data = {
                                 "user_center": user_center,
                                 "threat_centers": threat_centers,
-                                "frame_number": frame_number # Include frame number for context
+                                "frame_number": frame_number, # Include frame number for context
+                                "image_data": img_base64
                             }
                             
                             # Put data onto the queue
